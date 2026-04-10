@@ -110,10 +110,18 @@ def search_memories(
     room: str = None,
     n_results: int = 5,
     config=None,
+    rerank: bool = None,
 ) -> dict:
     """
     Programmatic search — returns a dict instead of printing.
     Used by the MCP server and other callers that need data.
+
+    Parameters
+    ----------
+    rerank : bool or None
+        If True, rerank results using the configured reranker. If False,
+        skip reranking. If None (default), use the config setting
+        (``rerank.enabled``).
     """
     if config is None:
         config = MempalaceConfig()
@@ -133,6 +141,22 @@ def search_memories(
             "hint": "Run: mempalace init <dir> && mempalace mine <dir>",
         }
 
+    # Resolve reranker if requested.
+    reranker = None
+    if rerank is not False:
+        from .rerankers import create_reranker
+
+        reranker = create_reranker(config)
+        if rerank is None and reranker is None:
+            pass  # config says disabled or unavailable → skip
+        elif rerank is True and reranker is None:
+            logger.warning("Reranking requested but no reranker configured; skipping")
+
+    # If reranking, fetch more candidates so the reranker has a good pool.
+    fetch_n = n_results
+    if reranker is not None:
+        fetch_n = n_results * reranker.candidate_multiplier
+
     # Build where filter
     where = {}
     if wing and room:
@@ -145,7 +169,7 @@ def search_memories(
     try:
         kwargs = {
             "query_texts": [query],
-            "n_results": n_results,
+            "n_results": fetch_n,
             "include": ["documents", "metadatas", "distances"],
         }
         if where:
@@ -171,8 +195,15 @@ def search_memories(
             }
         )
 
+    # Rerank if configured.
+    if reranker is not None and hits:
+        hits = reranker.rerank(query, hits, top_n=n_results)
+    else:
+        hits = hits[:n_results]
+
     return {
         "query": query,
         "filters": {"wing": wing, "room": room},
+        "reranked": reranker is not None,
         "results": hits,
     }

@@ -272,13 +272,17 @@ def tool_get_taxonomy():
     return {"taxonomy": taxonomy}
 
 
-def tool_search(query: str, limit: int = 5, wing: str = None, room: str = None):
+def tool_search(
+    query: str, limit: int = 5, wing: str = None, room: str = None, rerank: bool = None
+):
     return search_memories(
         query,
         palace_path=_config.palace_path,
         wing=wing,
         room=room,
         n_results=limit,
+        config=_config,
+        rerank=rerank,
     )
 
 
@@ -760,7 +764,7 @@ TOOLS = {
         "handler": tool_graph_stats,
     },
     "mempalace_search": {
-        "description": "Semantic search. Returns verbatim drawer content with similarity scores.",
+        "description": "Semantic search. Returns verbatim drawer content with similarity scores. Optionally reranks using a cross-encoder model for higher precision.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -768,6 +772,10 @@ TOOLS = {
                 "limit": {"type": "integer", "description": "Max results (default 5)"},
                 "wing": {"type": "string", "description": "Filter by wing (optional)"},
                 "room": {"type": "string", "description": "Filter by room (optional)"},
+                "rerank": {
+                    "type": "boolean",
+                    "description": "Rerank results with cross-encoder (optional, uses config default if omitted)",
+                },
             },
             "required": ["query"],
         },

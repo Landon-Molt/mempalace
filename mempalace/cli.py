@@ -99,18 +99,74 @@ def cmd_mine(args):
 
 
 def cmd_search(args):
-    from .searcher import search, SearchError
+    from .searcher import search, search_memories, SearchError
     from .providers import DimensionMismatchError
 
-    palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
+    palace_config = MempalaceConfig()
+    palace_path = os.path.expanduser(args.palace) if args.palace else palace_config.palace_path
+
+    # Determine rerank: --rerank flag, --no-rerank flag, or config default.
+    rerank_flag = getattr(args, "rerank", None)
+
     try:
-        search(
-            query=args.query,
-            palace_path=palace_path,
-            wing=args.wing,
-            room=args.room,
-            n_results=args.results,
-        )
+        if rerank_flag is not None:
+            # Use the programmatic path which supports reranking.
+            result = search_memories(
+                query=args.query,
+                palace_path=palace_path,
+                wing=args.wing,
+                room=args.room,
+                n_results=args.results,
+                config=palace_config,
+                rerank=rerank_flag,
+            )
+            if "error" in result:
+                print(f"\n  {result['error']}")
+                if "hint" in result:
+                    print(f"  {result['hint']}")
+                sys.exit(1)
+
+            # Print results in the same format as the print-based search.
+            hits = result.get("results", [])
+            reranked = result.get("reranked", False)
+            if not hits:
+                print(f'\n  No results found for: "{args.query}"')
+                return
+
+            print(f"\n{'=' * 60}")
+            print(f'  Results for: "{args.query}"')
+            if args.wing:
+                print(f"  Wing: {args.wing}")
+            if args.room:
+                print(f"  Room: {args.room}")
+            if reranked:
+                print("  Reranked: yes")
+            print(f"{'=' * 60}\n")
+
+            for i, hit in enumerate(hits, 1):
+                wing_name = hit.get("wing", "?")
+                room_name = hit.get("room", "?")
+                source = hit.get("source_file", "?")
+                score = hit.get("rerank_score", hit.get("similarity", 0))
+                print(f"  [{i}] {wing_name} / {room_name}")
+                print(f"      Source: {source}")
+                print(f"      Score:  {score:.3f}" + (" (reranked)" if "rerank_score" in hit else ""))
+                print()
+                for line in hit.get("text", "").strip().split("\n"):
+                    print(f"      {line}")
+                print()
+                print(f"  {'─' * 56}")
+            print()
+        else:
+            # Default: use the print-based search (no reranking).
+            search(
+                query=args.query,
+                palace_path=palace_path,
+                wing=args.wing,
+                room=args.room,
+                n_results=args.results,
+                config=palace_config,
+            )
     except DimensionMismatchError as e:
         print(f"\n  Dimension mismatch:\n{e}", file=sys.stderr)
         sys.exit(2)
@@ -715,6 +771,19 @@ def main():
     p_search.add_argument("--wing", default=None, help="Limit to one project")
     p_search.add_argument("--room", default=None, help="Limit to one room")
     p_search.add_argument("--results", type=int, default=5, help="Number of results")
+    rerank_group = p_search.add_mutually_exclusive_group()
+    rerank_group.add_argument(
+        "--rerank",
+        action="store_true",
+        default=None,
+        help="Rerank results using the configured cross-encoder model",
+    )
+    rerank_group.add_argument(
+        "--no-rerank",
+        dest="rerank",
+        action="store_false",
+        help="Skip reranking even if configured",
+    )
 
     # compress
     p_compress = sub.add_parser(

@@ -58,13 +58,15 @@ def test_cmd_search_calls_search(mock_config_cls):
     )
     with patch("mempalace.searcher.search") as mock_search:
         cmd_search(args)
-        mock_search.assert_called_once_with(
-            query="test query",
-            palace_path="/fake/palace",
-            wing="mywing",
-            room="myroom",
-            n_results=3,
-        )
+        # Default path (no --rerank flag) calls the print-based search().
+        # Post-refactor, config is now passed through.
+        mock_search.assert_called_once()
+        call_kwargs = mock_search.call_args.kwargs
+        assert call_kwargs["query"] == "test query"
+        assert call_kwargs["palace_path"] == "/fake/palace"
+        assert call_kwargs["wing"] == "mywing"
+        assert call_kwargs["room"] == "myroom"
+        assert call_kwargs["n_results"] == 3
 
 
 @patch("mempalace.cli.MempalaceConfig")
