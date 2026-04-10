@@ -64,6 +64,12 @@ def cmd_init(args):
     detect_rooms_local(project_dir=args.dir, yes=getattr(args, "yes", False))
     MempalaceConfig().init()
 
+    # Pass 3: configure embedding provider, compression format, and reranker.
+    # Auto-detect oMLX; when --yes is given, accept all defaults silently.
+    from .onboarding import configure_providers
+
+    configure_providers(auto_accept=getattr(args, "yes", False))
+
 
 def cmd_mine(args):
     palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path

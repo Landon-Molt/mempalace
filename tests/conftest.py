@@ -35,6 +35,24 @@ from mempalace.knowledge_graph import KnowledgeGraph  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
+def _block_omlx_probe(monkeypatch):
+    """Prevent tests from probing the real oMLX server.
+
+    Without this, any test that calls cmd_init → configure_providers would
+    detect the locally running oMLX server, write an oMLX embedding config
+    to the session-temp HOME, and pollute every subsequent test that
+    constructs a default MempalaceConfig.
+    """
+    try:
+        from mempalace.providers import probe
+
+        monkeypatch.setattr(probe, "probe_omlx", lambda *a, **kw: None)
+    except (ImportError, AttributeError):
+        pass
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _reset_mcp_cache():
     """Reset the MCP server's cached ChromaDB client/collection between tests."""
 

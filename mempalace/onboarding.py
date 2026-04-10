@@ -479,6 +479,202 @@ def quick_setup(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Provider / stack configuration (Phase 4 addition)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _probe_providers(base_url: str = "http://127.0.0.1:8000/v1") -> dict:
+    """Probe for a reachable oMLX (or other OpenAI-compatible) server.
+
+    Returns::
+
+        {
+            "available": bool,
+            "models": [...],
+            "suggestions": {
+                "embedding": "Qwen3-Embedding-0.6B-8bit" or None,
+                "rerank": "Qwen3-Reranker-4B-4bit-MLX" or None,
+                "generate": "Qwen3.5-35B-A3B-8bit" or None,
+            },
+        }
+    """
+    from .providers.probe import probe_omlx
+
+    models = probe_omlx(base_url)
+    if not models:
+        return {"available": False, "models": [], "suggestions": {}}
+
+    # Pick best candidates from loaded models.
+    suggestions = {"embedding": None, "rerank": None, "generate": None}
+    for m in models:
+        lower = m.lower()
+        if ("embedding" in lower or "embed" in lower) and not suggestions["embedding"]:
+            suggestions["embedding"] = m
+        elif "rerank" in lower and not suggestions["rerank"]:
+            suggestions["rerank"] = m
+    # Generation model: prefer larger models, skip embed/rerank
+    for m in models:
+        lower = m.lower()
+        if "embed" not in lower and "rerank" not in lower:
+            suggestions["generate"] = m
+            break
+
+    return {"available": True, "models": models, "suggestions": suggestions}
+
+
+def _ask_stack_mode(omlx_info: dict, auto_accept: bool = False) -> dict:
+    """Ask the user to configure the memory stack (embedding, compression,
+    reranker). Returns a config dict to merge into config.json.
+
+    When ``auto_accept=True`` (``--yes`` flag), picks sensible defaults
+    without prompting.
+    """
+    config_updates = {}
+
+    # ── Embedding ─────────────────────────────────────────────────────
+
+    if omlx_info["available"]:
+        embed_model = omlx_info["suggestions"].get("embedding")
+        if embed_model:
+            if auto_accept:
+                print(f"  Embedding: {embed_model} (auto-detected via oMLX)")
+            else:
+                _hr()
+                print(f"""
+  Local inference server detected at http://127.0.0.1:8000
+  Models loaded: {len(omlx_info['models'])}
+  Suggested embedding model: {embed_model}
+
+  This replaces ChromaDB's default English-only embedder with a
+  multilingual model that handles English, Chinese, and German.
+""")
+                if not _yn(f"Use {embed_model} for embeddings?"):
+                    embed_model = None
+
+            if embed_model:
+                config_updates["embedding"] = {
+                    "provider": "openai_compatible",
+                    "base_url": "http://127.0.0.1:8000/v1",
+                    "model": embed_model,
+                }
+    else:
+        if not auto_accept:
+            _hr()
+            print("""
+  No local inference server detected at http://127.0.0.1:8000.
+  Using ChromaDB's default embedding model (all-MiniLM-L6-v2, English).
+  To use a local multilingual model later, set 'embedding' in config.json.
+""")
+
+    # ── Compression stack ─────────────────────────────────────────────
+
+    if auto_accept:
+        # Auto-accept: raw mode (no compression), safest default
+        stack_choice = "1"
+    else:
+        _hr()
+        print("""
+  Compression stack — how should MemPalace summarize your memories?
+
+    [1]  Raw only     — no summaries, pure verbatim search (recommended)
+    [2]  Raw + AAAK   — rule-based English entity codes, no LLM needed
+    [3]  Raw + Wenjian — Classical Chinese shorthand, LLM-assisted optional
+""")
+        while True:
+            stack_choice = input("  Your choice [1/2/3]: ").strip()
+            if stack_choice in ("1", "2", "3"):
+                break
+            print("  Please enter 1, 2, or 3.")
+
+    if stack_choice == "2":
+        config_updates["compression"] = {"format": "aaak", "rule_only": True}
+        print("  Compression: AAAK (rule-based)")
+    elif stack_choice == "3":
+        config_updates["compression"] = {"format": "wenjian"}
+
+        # Ask about LLM for Wenjian
+        gen_model = omlx_info.get("suggestions", {}).get("generate") if omlx_info["available"] else None
+        if gen_model and not auto_accept:
+            if _yn(f"  Enable LLM-assisted compression via {gen_model}?"):
+                config_updates["compression"]["llm_base_url"] = "http://127.0.0.1:8000/v1"
+                config_updates["compression"]["llm_model"] = gen_model
+                print(f"  Compression: Wenjian + LLM ({gen_model})")
+            else:
+                config_updates["compression"]["rule_only"] = True
+                print("  Compression: Wenjian (rule-based only)")
+        else:
+            config_updates["compression"]["rule_only"] = True
+            if stack_choice == "3":
+                print("  Compression: Wenjian (rule-based only)")
+    else:
+        print("  Compression: raw only (no summaries)")
+
+    # ── Reranker ──────────────────────────────────────────────────────
+
+    rerank_model = omlx_info.get("suggestions", {}).get("rerank") if omlx_info["available"] else None
+    if rerank_model:
+        if auto_accept:
+            enable_rerank = True
+        else:
+            enable_rerank = _yn(f"  Enable search reranking via {rerank_model}?")
+
+        if enable_rerank:
+            config_updates["rerank"] = {
+                "enabled": True,
+                "base_url": "http://127.0.0.1:8000/v1",
+                "model": rerank_model,
+            }
+            print(f"  Reranker: {rerank_model}")
+
+    return config_updates
+
+
+def configure_providers(config_dir=None, auto_accept: bool = False) -> dict:
+    """Run provider configuration and write results to config.json.
+
+    Called at the end of ``mempalace init``. Returns the config dict
+    that was written (for testing).
+    """
+    import json
+
+    config_path = Path(config_dir) if config_dir else Path.home() / ".mempalace"
+    config_file = config_path / "config.json"
+
+    # Load existing config (created by MempalaceConfig.init())
+    existing = {}
+    if config_file.exists():
+        try:
+            with open(config_file, "r") as f:
+                existing = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            existing = {}
+
+    # Probe
+    omlx_info = _probe_providers()
+
+    # Ask
+    updates = _ask_stack_mode(omlx_info, auto_accept=auto_accept)
+
+    if not updates:
+        return existing
+
+    # Merge into existing config
+    for key, value in updates.items():
+        existing[key] = value
+
+    # Write back
+    config_path.mkdir(parents=True, exist_ok=True)
+    with open(config_file, "w") as f:
+        json.dump(existing, f, indent=2)
+    try:
+        config_file.chmod(0o600)
+    except (OSError, NotImplementedError):
+        pass
+
+    return existing
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # CLI
 # ─────────────────────────────────────────────────────────────────────────────
 

@@ -142,6 +142,7 @@ def test_cmd_init_with_entities_zero_total(mock_config_cls, tmp_path, capsys):
         patch("mempalace.entity_detector.scan_for_detection", return_value=fake_files),
         patch("mempalace.entity_detector.detect_entities", return_value=detected),
         patch("mempalace.room_detector_local.detect_rooms_local"),
+        patch("mempalace.onboarding.configure_providers"),
     ):
         cmd_init(args)
     out = capsys.readouterr().out
