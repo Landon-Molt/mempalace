@@ -153,6 +153,103 @@ class MempalaceConfig:
         return self._file_config.get("collection_name", DEFAULT_COLLECTION_NAME)
 
     @property
+    def embedding(self) -> dict:
+        """Embedding provider config.
+
+        Returns a dict with the shape expected by
+        ``providers.resolve_embedder``. When no ``embedding`` section is
+        present in ``config.json`` and no env overrides are set, returns
+        an empty dict — which ``resolve_embedder`` treats as "use
+        ChromaDB's default embedding function" for byte-identical backward
+        compatibility.
+
+        Environment variable overrides (applied on top of ``config.json``):
+
+        - ``MEMPALACE_EMBED_PROVIDER`` → provider name
+          (``auto`` / ``openai_compatible`` / ``sentence_transformers`` /
+          ``default``)
+        - ``MEMPALACE_EMBED_MODEL`` → model name
+        - ``MEMPALACE_EMBED_URL``   → base URL for OpenAI-compatible
+          backends
+        - ``MEMPALACE_EMBED_API_KEY`` → bearer token for cloud APIs
+        - ``MEMPALACE_EMBED_BATCH_SIZE`` → batch cap (default 48 for oMLX)
+        """
+        cfg = dict(self._file_config.get("embedding", {}) or {})
+        for env_var, key in (
+            ("MEMPALACE_EMBED_PROVIDER", "provider"),
+            ("MEMPALACE_EMBED_MODEL", "model"),
+            ("MEMPALACE_EMBED_URL", "base_url"),
+            ("MEMPALACE_EMBED_API_KEY", "api_key"),
+        ):
+            env_val = os.environ.get(env_var)
+            if env_val:
+                cfg[key] = env_val
+        env_batch = os.environ.get("MEMPALACE_EMBED_BATCH_SIZE")
+        if env_batch:
+            try:
+                cfg["batch_size"] = int(env_batch)
+            except ValueError:
+                pass
+        return cfg
+
+    @property
+    def llm(self) -> dict:
+        """LLM (chat/generation) provider config.
+
+        Used by the summarizer (Phase 2). Same shape as ``embedding``, plus:
+
+        - ``enabled`` (bool) — set to ``False`` to disable summarization
+          even if other fields are populated
+        """
+        cfg = dict(self._file_config.get("llm", {}) or {})
+        for env_var, key in (
+            ("MEMPALACE_LLM_PROVIDER", "provider"),
+            ("MEMPALACE_LLM_MODEL", "model"),
+            ("MEMPALACE_LLM_URL", "base_url"),
+            ("MEMPALACE_LLM_API_KEY", "api_key"),
+        ):
+            env_val = os.environ.get(env_var)
+            if env_val:
+                cfg[key] = env_val
+        return cfg
+
+    @property
+    def rerank(self) -> dict:
+        """Reranker config. Used by the searcher (Phase 3).
+
+        Defaults to disabled. Set ``enabled: true`` in ``config.json`` or
+        ``MEMPALACE_RERANK_ENABLED=1`` to turn it on.
+        """
+        cfg = dict(self._file_config.get("rerank", {}) or {})
+        for env_var, key in (
+            ("MEMPALACE_RERANK_PROVIDER", "provider"),
+            ("MEMPALACE_RERANK_MODEL", "model"),
+            ("MEMPALACE_RERANK_URL", "base_url"),
+            ("MEMPALACE_RERANK_API_KEY", "api_key"),
+        ):
+            env_val = os.environ.get(env_var)
+            if env_val:
+                cfg[key] = env_val
+        env_enabled = os.environ.get("MEMPALACE_RERANK_ENABLED")
+        if env_enabled is not None:
+            cfg["enabled"] = env_enabled.lower() in ("1", "true", "yes", "on")
+        return cfg
+
+    @property
+    def compression(self) -> dict:
+        """Compression / summarizer config. Used by Phase 2.
+
+        Shape::
+
+            {
+              "format": "aaak" | "wenjian",
+              "llm_enabled": bool,
+              "rule_only": bool
+            }
+        """
+        return dict(self._file_config.get("compression", {}) or {})
+
+    @property
     def people_map(self):
         """Mapping of name variants to canonical names."""
         if self._people_map_file.exists():
@@ -187,6 +284,19 @@ class MempalaceConfig:
                 "collection_name": DEFAULT_COLLECTION_NAME,
                 "topic_wings": DEFAULT_TOPIC_WINGS,
                 "hall_keywords": DEFAULT_HALL_KEYWORDS,
+                # Optional: configure a custom embedding provider. Leave
+                # this out or set "provider": "default" to use ChromaDB's
+                # built-in all-MiniLM-L6-v2 (English-only, 384-dim) —
+                # which is how MemPalace behaved before provider support
+                # was added. To use a local oMLX server with Qwen3
+                # embeddings (multilingual, 1024-dim), uncomment the
+                # block below:
+                #
+                # "embedding": {
+                #   "provider": "auto",
+                #   "base_url": "http://127.0.0.1:8000/v1",
+                #   "model": "Qwen3-Embedding-0.6B-8bit"
+                # }
             }
             with open(self._config_file, "w") as f:
                 json.dump(default_config, f, indent=2)
