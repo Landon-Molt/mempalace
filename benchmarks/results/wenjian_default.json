@@ -1,0 +1,20 @@
+{
+  "config": {
+    "mode": "wenjian",
+    "embedder": "default",
+    "rerank": false,
+    "k": 5,
+    "questions": 500
+  },
+  "recall_at_k": 96.6,
+  "per_type": {
+    "single-session-user": 94.29,
+    "multi-session": 98.5,
+    "single-session-preference": 96.67,
+    "temporal-reasoning": 93.98,
+    "knowledge-update": 100.0,
+    "single-session-assistant": 96.43
+  },
+  "elapsed_seconds": 1159.6,
+  "errors": 0
+}

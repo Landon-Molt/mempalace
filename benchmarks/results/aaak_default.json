@@ -1,0 +1,20 @@
+{
+  "config": {
+    "mode": "aaak",
+    "embedder": "default",
+    "rerank": false,
+    "k": 5,
+    "questions": 500
+  },
+  "recall_at_k": 84.2,
+  "per_type": {
+    "single-session-user": 61.43,
+    "multi-session": 87.97,
+    "single-session-preference": 70.0,
+    "temporal-reasoning": 90.23,
+    "knowledge-update": 93.59,
+    "single-session-assistant": 83.93
+  },
+  "elapsed_seconds": 1139.0,
+  "errors": 0
+}

@@ -1,0 +1,20 @@
+{
+  "config": {
+    "mode": "raw",
+    "embedder": "omlx",
+    "rerank": false,
+    "k": 5,
+    "questions": 500
+  },
+  "recall_at_k": 95.6,
+  "per_type": {
+    "single-session-user": 92.86,
+    "multi-session": 95.49,
+    "single-session-preference": 93.33,
+    "temporal-reasoning": 93.23,
+    "knowledge-update": 100.0,
+    "single-session-assistant": 100.0
+  },
+  "elapsed_seconds": 786.2,
+  "errors": 0
+}

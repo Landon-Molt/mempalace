@@ -1,0 +1,20 @@
+{
+  "config": {
+    "mode": "aaak",
+    "embedder": "omlx",
+    "rerank": false,
+    "k": 5,
+    "questions": 500
+  },
+  "recall_at_k": 87.8,
+  "per_type": {
+    "single-session-user": 65.71,
+    "multi-session": 93.98,
+    "single-session-preference": 70.0,
+    "temporal-reasoning": 90.98,
+    "knowledge-update": 94.87,
+    "single-session-assistant": 92.86
+  },
+  "elapsed_seconds": 783.7,
+  "errors": 0
+}
