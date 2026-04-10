@@ -278,28 +278,55 @@ def cmd_mcp(args):
 
 
 def cmd_compress(args):
-    """Compress drawers in a wing using AAAK Dialect."""
-    from .dialect import Dialect
+    """Compress drawers using AAAK or Wenjian format."""
+    from .formats import resolve_format
     from .palace import get_collection
+    from .providers import resolve_llm
+    from .summarizer import Summarizer
 
     palace_config = MempalaceConfig()
     palace_path = (
         os.path.expanduser(args.palace) if args.palace else palace_config.palace_path
     )
 
-    # Load dialect (with optional entity config)
-    config_path = args.config
-    if not config_path:
-        for candidate in ["entities.json", os.path.join(palace_path, "entities.json")]:
-            if os.path.exists(candidate):
-                config_path = candidate
-                break
+    # Determine format: --format flag > config > default (aaak for backward compat)
+    compression_cfg = palace_config.compression
+    if not isinstance(compression_cfg, dict):
+        compression_cfg = {}
+    format_name = (
+        getattr(args, "format", None)
+        or compression_cfg.get("format")
+        or "aaak"
+    )
+    rule_only = (
+        getattr(args, "rule_only", False)
+        or compression_cfg.get("rule_only", False)
+    )
 
-    if config_path and os.path.exists(config_path):
-        dialect = Dialect.from_config(config_path)
-        print(f"  Loaded entity config: {config_path}")
+    # Build the summarizer with format + optional LLM.
+    fmt_kwargs = {}
+    if format_name == "aaak":
+        # Entity config for AAAK
+        config_path = args.config
+        if not config_path:
+            for candidate in ["entities.json", os.path.join(palace_path, "entities.json")]:
+                if os.path.exists(candidate):
+                    config_path = candidate
+                    break
+        if config_path and os.path.exists(config_path):
+            fmt_kwargs["config_path"] = config_path
+            print(f"  Loaded entity config: {config_path}")
+
+    fmt = resolve_format(format_name, **fmt_kwargs)
+    llm = None if rule_only else resolve_llm(palace_config)
+    summarizer = Summarizer(fmt, llm=llm, rule_only=rule_only)
+
+    mode_label = f"{format_name}"
+    if summarizer.has_llm:
+        mode_label += " + LLM"
     else:
-        dialect = Dialect()
+        mode_label += " (rule-only)"
+    print(f"  Format: {mode_label}")
 
     # Connect to palace
     try:
@@ -352,42 +379,28 @@ def cmd_compress(args):
     compressed_entries = []
 
     for doc, meta, doc_id in zip(docs, metas, ids):
-        compressed = dialect.compress(doc, metadata=meta)
-        stats = dialect.compression_stats(doc, compressed)
+        entry = summarizer.compress(doc, context=meta)
 
-        # Dialect.compression_stats uses the `*_est` / `summary_*` / `size_ratio`
-        # naming; alias into the legacy names the CLI was originally written
-        # for so both old tests (which mock stats) and the real dialect work.
-        stats_normalized = {
-            "original_chars": stats.get("original_chars", len(doc)),
-            "compressed_chars": stats.get(
-                "compressed_chars", stats.get("summary_chars", len(compressed))
-            ),
-            "original_tokens": stats.get(
-                "original_tokens", stats.get("original_tokens_est", 0)
-            ),
-            "compressed_tokens": stats.get(
-                "compressed_tokens", stats.get("summary_tokens_est", 0)
-            ),
-            "ratio": stats.get("ratio", stats.get("size_ratio", 1.0)),
-        }
+        total_original += len(doc)
+        total_compressed += len(entry.text)
 
-        total_original += stats_normalized["original_chars"]
-        total_compressed += stats_normalized["compressed_chars"]
-
-        compressed_entries.append((doc_id, compressed, meta, stats_normalized))
+        compressed_entries.append((doc_id, entry, meta))
 
         if args.dry_run:
             wing_name = meta.get("wing", "?")
             room_name = meta.get("room", "?")
             source = Path(meta.get("source_file", "?")).name
             print(f"  [{wing_name}/{room_name}] {source}")
+            ratio = entry.compression_ratio
             print(
-                f"    {stats_normalized['original_tokens']}t -> "
-                f"{stats_normalized['compressed_tokens']}t "
-                f"({stats_normalized['ratio']:.1f}x)"
+                f"    {entry.original_token_count}t -> "
+                f"{entry.compressed_token_count}t "
+                f"({ratio:.1f}x) "
+                f"pres={entry.entities_preserved_ratio:.0%}"
             )
-            print(f"    {compressed}")
+            print(f"    {entry.text[:200]}")
+            if entry.missing_entities:
+                print(f"    missing: {', '.join(entry.missing_entities[:5])}")
             print()
 
     # Store compressed versions (unless dry-run)
@@ -398,13 +411,17 @@ def cmd_compress(args):
                 collection_name="mempalace_compressed",
                 config=palace_config,
             )
-            for doc_id, compressed, meta, stats in compressed_entries:
+            for doc_id, entry, meta in compressed_entries:
                 comp_meta = dict(meta)
-                comp_meta["compression_ratio"] = round(stats["ratio"], 1)
-                comp_meta["original_tokens"] = stats["original_tokens"]
+                comp_meta["compression_ratio"] = round(entry.compression_ratio, 1)
+                comp_meta["original_tokens"] = entry.original_token_count
+                comp_meta["format_name"] = entry.format_name
+                comp_meta["preservation_ratio"] = round(entry.entities_preserved_ratio, 2)
+                if entry.llm_model:
+                    comp_meta["llm_model"] = entry.llm_model
                 comp_col.upsert(
                     ids=[doc_id],
-                    documents=[compressed],
+                    documents=[entry.text],
                     metadatas=[comp_meta],
                 )
             print(
@@ -416,9 +433,8 @@ def cmd_compress(args):
 
     # Summary
     ratio = total_original / max(total_compressed, 1)
-    orig_tokens = Dialect.count_tokens("x" * total_original)
-    comp_tokens = Dialect.count_tokens("x" * total_compressed)
-    print(f"  Total: {orig_tokens:,}t -> {comp_tokens:,}t ({ratio:.1f}x compression)")
+    print(f"\n  Total: {len(compressed_entries)} drawers compressed ({ratio:.1f}x avg)")
+    print(f"  Format: {format_name}")
     if args.dry_run:
         print("  (dry run -- nothing stored)")
 
@@ -702,14 +718,26 @@ def main():
 
     # compress
     p_compress = sub.add_parser(
-        "compress", help="Compress drawers using AAAK Dialect (~30x reduction)"
+        "compress",
+        help="Compress drawers using AAAK or Wenjian format",
     )
     p_compress.add_argument("--wing", default=None, help="Wing to compress (default: all wings)")
     p_compress.add_argument(
         "--dry-run", action="store_true", help="Preview compression without storing"
     )
     p_compress.add_argument(
-        "--config", default=None, help="Entity config JSON (e.g. entities.json)"
+        "--config", default=None, help="Entity config JSON (e.g. entities.json) — used by AAAK format"
+    )
+    p_compress.add_argument(
+        "--format",
+        choices=["aaak", "wenjian"],
+        default=None,
+        help="Compression format (default: from config, or 'aaak' for backward compat)",
+    )
+    p_compress.add_argument(
+        "--rule-only",
+        action="store_true",
+        help="Use rule-based compression only, skip LLM even if configured",
     )
 
     # wake-up
