@@ -15,6 +15,7 @@ from pathlib import Path
 from datetime import datetime
 from collections import defaultdict
 
+from .config import MempalaceConfig
 from .normalize import normalize
 from .palace import SKIP_DIRS, get_collection, file_already_mined
 
@@ -253,6 +254,8 @@ def mine_convos(
     if limit > 0:
         files = files[:limit]
 
+    palace_config = MempalaceConfig()
+
     print(f"\n{'=' * 55}")
     print("  MemPalace Mine — Conversations")
     print(f"{'=' * 55}")
@@ -264,7 +267,9 @@ def mine_convos(
         print("  DRY RUN — nothing will be filed")
     print(f"{'-' * 55}\n")
 
-    collection = get_collection(palace_path) if not dry_run else None
+    collection = (
+        get_collection(palace_path, config=palace_config) if not dry_run else None
+    )
 
     total_drawers = 0
     files_skipped = 0

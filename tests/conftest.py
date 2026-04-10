@@ -42,8 +42,16 @@ def _reset_mcp_cache():
         try:
             from mempalace import mcp_server
 
-            mcp_server._client_cache = None
-            mcp_server._collection_cache = None
+            # Use the public invalidator if present (post-refactor), else
+            # fall back to zeroing the legacy globals if they still exist.
+            invalidate = getattr(mcp_server, "_invalidate_collection_cache", None)
+            if invalidate is not None:
+                invalidate()
+            else:
+                if hasattr(mcp_server, "_collection_cache"):
+                    mcp_server._collection_cache = None
+                if hasattr(mcp_server, "_client_cache"):
+                    mcp_server._client_cache = None
         except (ImportError, AttributeError):
             pass
 

@@ -215,12 +215,17 @@ class TestReadTools:
         assert result["taxonomy"]["project"]["frontend"] == 1
         assert result["taxonomy"]["notes"]["planning"] == 1
 
-    def test_no_palace_returns_error(self, monkeypatch, config, kg):
+    def test_empty_palace_returns_zero(self, monkeypatch, config, kg):
+        """Calling tool_status on a fresh/empty palace returns a valid
+        status dict with zero drawers, not an error. Post-refactor,
+        get_collection transparently creates the collection on read.
+        """
         _patch_mcp_server(monkeypatch, config, kg)
         from mempalace.mcp_server import tool_status
 
         result = tool_status()
-        assert "error" in result
+        assert "total_drawers" in result
+        assert result["total_drawers"] == 0
 
 
 # ── Search Tool ─────────────────────────────────────────────────────────

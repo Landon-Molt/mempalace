@@ -30,7 +30,6 @@ from .config import MempalaceConfig, sanitize_name, sanitize_content
 from .version import __version__
 from .searcher import search_memories
 from .palace_graph import traverse, find_tunnels, graph_stats
-import chromadb
 
 from .knowledge_graph import KnowledgeGraph
 
@@ -61,10 +60,6 @@ if _args.palace:
     _kg = KnowledgeGraph(db_path=os.path.join(_config.palace_path, "knowledge_graph.sqlite3"))
 else:
     _kg = KnowledgeGraph()
-
-
-_client_cache = None
-_collection_cache = None
 
 
 # ==================== WRITE-AHEAD LOG ====================
@@ -100,30 +95,61 @@ def _wal_log(operation: str, params: dict, result: dict = None):
         logger.error(f"WAL write failed: {e}")
 
 
-_client_cache = None
 _collection_cache = None
+_collection_cache_key: tuple = (None, None)  # (palace_path, config fingerprint)
 
 
-def _get_client():
-    """Return a singleton ChromaDB PersistentClient."""
-    global _client_cache
-    if _client_cache is None:
-        _client_cache = chromadb.PersistentClient(path=_config.palace_path)
-    return _client_cache
+def _config_fingerprint() -> tuple:
+    """Build a cheap hashable fingerprint of the embedding-related config.
+
+    Used to key the collection cache. When the user changes embedding
+    provider/model mid-session (e.g., via ``mempalace reembed`` invalidating
+    the cache), the fingerprint changes and the cache is rebuilt.
+    """
+    embed = _config.embedding or {}
+    return (
+        embed.get("provider"),
+        embed.get("model"),
+        embed.get("base_url"),
+    )
+
+
+def _invalidate_collection_cache():
+    """Drop the cached collection so the next call reopens with fresh config."""
+    global _collection_cache, _collection_cache_key
+    _collection_cache = None
+    _collection_cache_key = (None, None)
 
 
 def _get_collection(create=False):
-    """Return the ChromaDB collection, caching the client between calls."""
-    global _collection_cache
-    try:
-        client = _get_client()
-        if create:
-            _collection_cache = client.get_or_create_collection(_config.collection_name)
-        elif _collection_cache is None:
-            _collection_cache = client.get_collection(_config.collection_name)
+    """Return the ChromaDB collection through the palace helper, caching it.
+
+    Cache is keyed on ``(palace_path, config_fingerprint)`` so that a
+    mid-process config change (e.g., reembed updating the provider block)
+    invalidates the cached handle naturally.
+    """
+    global _collection_cache, _collection_cache_key
+
+    from .palace import get_collection as _palace_get_collection
+
+    current_key = (_config.palace_path, _config_fingerprint())
+
+    if _collection_cache is not None and _collection_cache_key == current_key:
         return _collection_cache
-    except Exception:
+
+    try:
+        col = _palace_get_collection(
+            _config.palace_path,
+            collection_name=_config.collection_name,
+            config=_config,
+        )
+    except Exception as e:
+        logger.debug("mcp _get_collection failed: %s", e)
         return None
+
+    _collection_cache = col
+    _collection_cache_key = current_key
+    return _collection_cache
 
 
 def _no_palace():

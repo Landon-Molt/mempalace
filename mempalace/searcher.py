@@ -9,7 +9,9 @@ Returns verbatim text — the actual words, never summaries.
 import logging
 from pathlib import Path
 
-import chromadb
+from .config import MempalaceConfig
+from .palace import get_collection
+from .providers import DimensionMismatchError
 
 logger = logging.getLogger("mempalace_mcp")
 
@@ -18,14 +20,25 @@ class SearchError(Exception):
     """Raised when search cannot proceed (e.g. no palace found)."""
 
 
-def search(query: str, palace_path: str, wing: str = None, room: str = None, n_results: int = 5):
+def search(
+    query: str,
+    palace_path: str,
+    wing: str = None,
+    room: str = None,
+    n_results: int = 5,
+    config=None,
+):
     """
     Search the palace. Returns verbatim drawer content.
     Optionally filter by wing (project) or room (aspect).
     """
+    if config is None:
+        config = MempalaceConfig()
     try:
-        client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_collection("mempalace_drawers")
+        col = get_collection(palace_path, config=config)
+    except DimensionMismatchError:
+        # Propagate so the CLI prints the actionable guidance.
+        raise
     except Exception:
         print(f"\n  No palace found at {palace_path}")
         print("  Run: mempalace init <dir> then mempalace mine <dir>")
@@ -91,15 +104,28 @@ def search(query: str, palace_path: str, wing: str = None, room: str = None, n_r
 
 
 def search_memories(
-    query: str, palace_path: str, wing: str = None, room: str = None, n_results: int = 5
+    query: str,
+    palace_path: str,
+    wing: str = None,
+    room: str = None,
+    n_results: int = 5,
+    config=None,
 ) -> dict:
     """
     Programmatic search — returns a dict instead of printing.
     Used by the MCP server and other callers that need data.
     """
+    if config is None:
+        config = MempalaceConfig()
     try:
-        client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_collection("mempalace_drawers")
+        col = get_collection(palace_path, config=config)
+    except DimensionMismatchError as e:
+        logger.error("Dimension mismatch at %s: %s", palace_path, e)
+        return {
+            "error": "Dimension mismatch",
+            "hint": "Run: mempalace reembed --palace {path} to rebuild with the current embedder",
+            "detail": str(e),
+        }
     except Exception as e:
         logger.error("No palace found at %s: %s", palace_path, e)
         return {

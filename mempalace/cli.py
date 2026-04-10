@@ -100,6 +100,7 @@ def cmd_mine(args):
 
 def cmd_search(args):
     from .searcher import search, SearchError
+    from .providers import DimensionMismatchError
 
     palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
     try:
@@ -110,6 +111,9 @@ def cmd_search(args):
             room=args.room,
             n_results=args.results,
         )
+    except DimensionMismatchError as e:
+        print(f"\n  Dimension mismatch:\n{e}", file=sys.stderr)
+        sys.exit(2)
     except SearchError:
         sys.exit(1)
 
@@ -159,10 +163,16 @@ def cmd_status(args):
 
 def cmd_repair(args):
     """Rebuild palace vector index from SQLite metadata."""
-    import chromadb
     import shutil
 
-    palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
+    import chromadb
+
+    from .palace import get_collection
+
+    palace_config = MempalaceConfig()
+    palace_path = (
+        os.path.expanduser(args.palace) if args.palace else palace_config.palace_path
+    )
 
     if not os.path.isdir(palace_path):
         print(f"\n  No palace found at {palace_path}")
@@ -173,10 +183,9 @@ def cmd_repair(args):
     print(f"{'=' * 55}\n")
     print(f"  Palace: {palace_path}")
 
-    # Try to read existing drawers
+    # Try to read existing drawers through the configured embedder.
     try:
-        client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_collection("mempalace_drawers")
+        col = get_collection(palace_path, config=palace_config)
         total = col.count()
         print(f"  Drawers found: {total}")
     except Exception as e:
@@ -212,8 +221,12 @@ def cmd_repair(args):
     shutil.copytree(palace_path, backup_path)
 
     print("  Rebuilding collection...")
-    client.delete_collection("mempalace_drawers")
-    new_col = client.create_collection("mempalace_drawers")
+    # Collection-level maintenance op — delete then recreate. We need a raw
+    # client for delete_collection; the subsequent get_collection call
+    # recreates the collection with the correct config-resolved embedder.
+    raw_client = chromadb.PersistentClient(path=palace_path)
+    raw_client.delete_collection("mempalace_drawers")
+    new_col = get_collection(palace_path, config=palace_config)
 
     filed = 0
     for i in range(0, len(all_ids), batch_size):
@@ -266,10 +279,13 @@ def cmd_mcp(args):
 
 def cmd_compress(args):
     """Compress drawers in a wing using AAAK Dialect."""
-    import chromadb
     from .dialect import Dialect
+    from .palace import get_collection
 
-    palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
+    palace_config = MempalaceConfig()
+    palace_path = (
+        os.path.expanduser(args.palace) if args.palace else palace_config.palace_path
+    )
 
     # Load dialect (with optional entity config)
     config_path = args.config
@@ -287,8 +303,7 @@ def cmd_compress(args):
 
     # Connect to palace
     try:
-        client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_collection("mempalace_drawers")
+        col = get_collection(palace_path, config=palace_config)
     except Exception:
         print(f"\n  No palace found at {palace_path}")
         print("  Run: mempalace init <dir> then mempalace mine <dir>")
@@ -340,10 +355,27 @@ def cmd_compress(args):
         compressed = dialect.compress(doc, metadata=meta)
         stats = dialect.compression_stats(doc, compressed)
 
-        total_original += stats["original_chars"]
-        total_compressed += stats["compressed_chars"]
+        # Dialect.compression_stats uses the `*_est` / `summary_*` / `size_ratio`
+        # naming; alias into the legacy names the CLI was originally written
+        # for so both old tests (which mock stats) and the real dialect work.
+        stats_normalized = {
+            "original_chars": stats.get("original_chars", len(doc)),
+            "compressed_chars": stats.get(
+                "compressed_chars", stats.get("summary_chars", len(compressed))
+            ),
+            "original_tokens": stats.get(
+                "original_tokens", stats.get("original_tokens_est", 0)
+            ),
+            "compressed_tokens": stats.get(
+                "compressed_tokens", stats.get("summary_tokens_est", 0)
+            ),
+            "ratio": stats.get("ratio", stats.get("size_ratio", 1.0)),
+        }
 
-        compressed_entries.append((doc_id, compressed, meta, stats))
+        total_original += stats_normalized["original_chars"]
+        total_compressed += stats_normalized["compressed_chars"]
+
+        compressed_entries.append((doc_id, compressed, meta, stats_normalized))
 
         if args.dry_run:
             wing_name = meta.get("wing", "?")
@@ -351,7 +383,9 @@ def cmd_compress(args):
             source = Path(meta.get("source_file", "?")).name
             print(f"  [{wing_name}/{room_name}] {source}")
             print(
-                f"    {stats['original_tokens']}t -> {stats['compressed_tokens']}t ({stats['ratio']:.1f}x)"
+                f"    {stats_normalized['original_tokens']}t -> "
+                f"{stats_normalized['compressed_tokens']}t "
+                f"({stats_normalized['ratio']:.1f}x)"
             )
             print(f"    {compressed}")
             print()
@@ -359,7 +393,11 @@ def cmd_compress(args):
     # Store compressed versions (unless dry-run)
     if not args.dry_run:
         try:
-            comp_col = client.get_or_create_collection("mempalace_compressed")
+            comp_col = get_collection(
+                palace_path,
+                collection_name="mempalace_compressed",
+                config=palace_config,
+            )
             for doc_id, compressed, meta, stats in compressed_entries:
                 comp_meta = dict(meta)
                 comp_meta["compression_ratio"] = round(stats["ratio"], 1)
@@ -383,6 +421,218 @@ def cmd_compress(args):
     print(f"  Total: {orig_tokens:,}t -> {comp_tokens:,}t ({ratio:.1f}x compression)")
     if args.dry_run:
         print("  (dry run -- nothing stored)")
+
+
+def cmd_reembed(args):
+    """Re-embed all drawers with the current config-resolved provider.
+
+    Used when the user switches embedding models or changes backend
+    (e.g., from ChromaDB default 384-dim to oMLX Qwen3 1024-dim). Walks
+    both the main ``mempalace_drawers`` collection and
+    ``mempalace_compressed`` if it exists, re-adds every document through
+    the new embedder, and updates the palace sidecar.
+
+    Idempotent: if the sidecar already matches the current config,
+    prints "up to date" and exits. Never destroys the palace directory —
+    takes a full backup under ``{palace}.backup`` first.
+    """
+    import shutil
+
+    import chromadb
+
+    from .palace import get_collection
+    from .palace_meta import read_meta, write_meta, meta_from_embedder, META_FILENAME
+    from .providers import ProviderError, resolve_embedder
+
+    palace_config = MempalaceConfig()
+    palace_path = (
+        os.path.expanduser(args.palace) if args.palace else palace_config.palace_path
+    )
+
+    if not os.path.isdir(palace_path):
+        print(f"\n  No palace found at {palace_path}")
+        sys.exit(1)
+
+    target_embedder = resolve_embedder(palace_config)
+    if target_embedder is None:
+        print(
+            "\n  No embedding provider configured — cannot reembed.\n"
+            "  Set `embedding` in ~/.mempalace/config.json or use env vars "
+            "(MEMPALACE_EMBED_PROVIDER, MEMPALACE_EMBED_MODEL, MEMPALACE_EMBED_URL).\n"
+        )
+        sys.exit(1)
+
+    # Warmup so we know the target dimension before we touch anything.
+    if target_embedder.embed_dim is None:
+        try:
+            target_embedder.embed("mempalace reembed warmup")
+        except Exception as e:
+            print(f"\n  Target embedder is unreachable: {e}")
+            sys.exit(1)
+
+    current_dim = target_embedder.embed_dim
+    current_model = target_embedder.model_name
+
+    stored_meta = read_meta(palace_path)
+
+    print(f"\n{'=' * 55}")
+    print("  MemPalace Reembed")
+    print(f"{'=' * 55}")
+    print(f"  Palace: {palace_path}")
+    if stored_meta:
+        print(
+            f"  From:   {stored_meta.embedding_model} "
+            f"(dim={stored_meta.embedding_dim}, provider={stored_meta.embedding_provider})"
+        )
+    else:
+        print("  From:   <unknown — no sidecar>")
+    print(f"  To:     {current_model} (dim={current_dim})")
+
+    if (
+        stored_meta
+        and stored_meta.embedding_dim == current_dim
+        and stored_meta.embedding_model == current_model
+    ):
+        print("\n  Palace is already embedded with the current provider. Nothing to do.")
+        return
+
+    # Read the existing drawers using a bypass-enabled get_collection so the
+    # dim check doesn't block us. .get() doesn't hit the embedder at all —
+    # it's a metadata+document query.
+    try:
+        old_col = get_collection(
+            palace_path,
+            collection_name="mempalace_drawers",
+            config=palace_config,
+            allow_dim_mismatch=True,
+        )
+        total = old_col.count()
+    except Exception as e:
+        print(f"\n  Error opening current palace: {e}")
+        sys.exit(1)
+
+    if total == 0:
+        print("\n  Palace has no drawers. Updating sidecar only.")
+        new_meta = meta_from_embedder(target_embedder)
+        if stored_meta is not None:
+            new_meta.created_at = stored_meta.created_at
+        write_meta(palace_path, new_meta)
+        return
+
+    if not args.force:
+        try:
+            response = input(f"\n  Re-embed {total} drawers? [y/N] ").strip().lower()
+        except EOFError:
+            response = ""
+        if response != "y":
+            print("  Aborted.")
+            return
+
+    # Backup first. Same pattern as cmd_repair.
+    palace_path_norm = palace_path.rstrip(os.sep)
+    backup_path = palace_path_norm + ".backup"
+    if os.path.exists(backup_path):
+        shutil.rmtree(backup_path)
+    print(f"\n  Backing up to {backup_path}...")
+    shutil.copytree(palace_path_norm, backup_path)
+
+    # Drain drawers.
+    print(f"  Extracting {total} drawers...")
+    batch_size = 500
+    all_ids, all_docs, all_metas = [], [], []
+    offset = 0
+    while offset < total:
+        batch = old_col.get(
+            limit=batch_size,
+            offset=offset,
+            include=["documents", "metadatas"],
+        )
+        all_ids.extend(batch.get("ids", []))
+        all_docs.extend(batch.get("documents", []))
+        all_metas.extend(batch.get("metadatas", []))
+        offset += batch_size
+
+    # Drain compressed collection if present.
+    comp_ids, comp_docs, comp_metas = [], [], []
+    try:
+        comp_col = get_collection(
+            palace_path,
+            collection_name="mempalace_compressed",
+            config=palace_config,
+            allow_dim_mismatch=True,
+        )
+        comp_total = comp_col.count()
+        if comp_total > 0:
+            print(f"  Extracting {comp_total} compressed drawers...")
+            offset = 0
+            while offset < comp_total:
+                batch = comp_col.get(
+                    limit=batch_size,
+                    offset=offset,
+                    include=["documents", "metadatas"],
+                )
+                comp_ids.extend(batch.get("ids", []))
+                comp_docs.extend(batch.get("documents", []))
+                comp_metas.extend(batch.get("metadatas", []))
+                offset += batch_size
+    except Exception:
+        pass
+
+    # Delete old collections (maintenance op — raw client).
+    print("  Dropping old collections...")
+    raw_client = chromadb.PersistentClient(path=palace_path)
+    for name in ("mempalace_drawers", "mempalace_compressed"):
+        try:
+            raw_client.delete_collection(name)
+        except Exception:
+            pass
+
+    # Clear stale sidecar so the next get_collection writes a fresh one.
+    meta_path = os.path.join(palace_path, META_FILENAME)
+    if os.path.exists(meta_path):
+        os.remove(meta_path)
+
+    # Recreate drawers collection via helper (fresh sidecar gets written).
+    new_col = get_collection(
+        palace_path,
+        collection_name="mempalace_drawers",
+        config=palace_config,
+    )
+
+    print(f"  Re-embedding {len(all_ids)} drawers...")
+    filed = 0
+    for i in range(0, len(all_ids), batch_size):
+        new_col.add(
+            ids=all_ids[i : i + batch_size],
+            documents=all_docs[i : i + batch_size],
+            metadatas=all_metas[i : i + batch_size],
+        )
+        filed += min(batch_size, len(all_ids) - i)
+        print(f"    {filed}/{len(all_ids)}")
+
+    # Re-embed compressed drawers if we had any.
+    if comp_ids:
+        new_comp = get_collection(
+            palace_path,
+            collection_name="mempalace_compressed",
+            config=palace_config,
+        )
+        print(f"  Re-embedding {len(comp_ids)} compressed drawers...")
+        filed = 0
+        for i in range(0, len(comp_ids), batch_size):
+            new_comp.add(
+                ids=comp_ids[i : i + batch_size],
+                documents=comp_docs[i : i + batch_size],
+                metadatas=comp_metas[i : i + batch_size],
+            )
+            filed += min(batch_size, len(comp_ids) - i)
+            print(f"    {filed}/{len(comp_ids)}")
+
+    print(f"\n  Reembed complete.")
+    print(f"  New dimension: {current_dim}")
+    print(f"  New model:     {current_model}")
+    print(f"  Backup saved:  {backup_path}")
+    print(f"{'=' * 55}\n")
 
 
 def main():
@@ -524,6 +774,17 @@ def main():
         help="Rebuild palace vector index from stored data (fixes segfaults after corruption)",
     )
 
+    # reembed
+    p_reembed = sub.add_parser(
+        "reembed",
+        help="Re-embed all drawers with the currently configured embedding provider",
+    )
+    p_reembed.add_argument(
+        "--force",
+        action="store_true",
+        help="Skip the confirmation prompt and reembed unconditionally",
+    )
+
     # mcp
     sub.add_parser(
         "mcp",
@@ -565,6 +826,7 @@ def main():
         "compress": cmd_compress,
         "wake-up": cmd_wakeup,
         "repair": cmd_repair,
+        "reembed": cmd_reembed,
         "status": cmd_status,
     }
     dispatch[args.command](args)

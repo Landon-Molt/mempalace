@@ -15,8 +15,7 @@ from pathlib import Path
 from datetime import datetime
 from collections import defaultdict
 
-import chromadb
-
+from .config import MempalaceConfig
 from .palace import SKIP_DIRS, get_collection, file_already_mined
 
 READABLE_EXTENSIONS = {
@@ -540,10 +539,13 @@ def mine(
     """Mine a project directory into the palace."""
 
     project_path = Path(project_dir).expanduser().resolve()
-    config = load_config(project_dir)
+    project_config = load_config(project_dir)
+    palace_config = MempalaceConfig()
 
-    wing = wing_override or config["wing"]
-    rooms = config.get("rooms", [{"name": "general", "description": "All project files"}])
+    wing = wing_override or project_config["wing"]
+    rooms = project_config.get(
+        "rooms", [{"name": "general", "description": "All project files"}]
+    )
 
     files = scan_project(
         project_dir,
@@ -569,7 +571,7 @@ def mine(
     print(f"{'─' * 55}\n")
 
     if not dry_run:
-        collection = get_collection(palace_path)
+        collection = get_collection(palace_path, config=palace_config)
     else:
         collection = None
 
@@ -612,11 +614,12 @@ def mine(
 # =============================================================================
 
 
-def status(palace_path: str):
+def status(palace_path: str, config: "MempalaceConfig" = None):
     """Show what's been filed in the palace."""
+    if config is None:
+        config = MempalaceConfig()
     try:
-        client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_collection("mempalace_drawers")
+        col = get_collection(palace_path, config=config)
     except Exception:
         print(f"\n  No palace found at {palace_path}")
         print("  Run: mempalace init <dir> then mempalace mine <dir>")
